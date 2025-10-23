@@ -1,4 +1,8 @@
-""" Streamlit app for windguru_scraper """
+"""
+    A small script to calculate a good day for fishing based on same data provided bu windguru
+    Created on:      23-Oct-2025
+    Original author: Adriano Jordão (adriano.jordao@gmail.com)
+"""
 
 import io
 from zoneinfo import ZoneInfo
@@ -283,4 +287,4 @@ else:
 
 # Footer
 st.divider()
-st.markdown("Made with ❤️ for fishermen | Data from [Windguru](https://www.windguru.cz)")
+st.markdown("Made with ❤️ for fishermen by Adriano Jordão| Data from [Windguru](https://www.windguru.cz)")
