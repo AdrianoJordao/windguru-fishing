@@ -287,4 +287,4 @@ else:
 
 # Footer
 st.divider()
-st.markdown("Made with ❤️ for fishermen by Adriano Jordão| Data from [Windguru](https://www.windguru.cz)")
+st.markdown("Made with ❤️ for fishermen by Adriano Jordão & Manuel Monteiro | Data from [Windguru](https://www.windguru.cz)")
