@@ -180,7 +180,7 @@ if submitted:
             # Capture print output
             output_buffer = io.StringIO()
             sys.stdout = output_buffer
-            
+
             # Create scraper and fetch data
             scraper = WindguruScraper(spot_url, spot_title_override=spot_name)
             df = scraper.fetch_data()

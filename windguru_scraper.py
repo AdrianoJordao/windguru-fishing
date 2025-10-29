@@ -43,13 +43,6 @@ class ForecastRecord:
     wind_gust_kmh: Optional[float]
 
 
-def _slugify(name: str) -> str:
-    s = name.strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s or "spot"
-
-
 class WindguruScraper:
     """ The scraper for windguru data """
 
@@ -514,62 +507,3 @@ class WindguruScraper:
             plt.show()  # BLOCKS for this beach
         else:
             plt.close(fig)
-
-
-# # ----------------------------- Runner (multiple spots) -----------------------------
-# if __name__ == "__main__":
-#     # Thresholds (used for horizontal bands + hourly status logic)
-#     user_ranges = {
-#         "wave_height_m": (0.0, 1.6),
-#         "wave_period_s": (0.0, 12.0),
-#         "wind_speed_kmh": (0.0, 20.0),
-#         "wind_gust_kmh": (0.0, 25.0),
-#     }
-
-#     # Spots to process (URL, pretty title)
-#     spots: List[Tuple[str, str]] = [
-#         ("https://www.windguru.cz/65000", "Sesimbra"),
-#         # ("https://www.windguru.cz/574", "Cascais"),
-#         # ("https://www.windguru.cz/501150", "Alcochete"),
-#         # ("https://www.windguru.cz/501155", "Praia da Rainha"),
-#         # ("https://www.windguru.cz/48963", "Costa da Caparica"),
-#     ]
-
-#     for url, title in spots:
-#         print("\n" + "=" * 80)
-#         print(f"Processing {title}  ({url})")
-#         scraper = WindguruScraper(url, spot_title_override=title)
-
-#         try:
-#             df = scraper.fetch_data()
-#             if df.empty:
-#                 print(f"[{title}] No data fetched; skipping plot.")
-#                 continue
-
-#             # Optional: filtering (not required for bands/plot)
-#             _ = scraper.filter_conditions(
-#                 wave_height_range=user_ranges["wave_height_m"],
-#                 wave_period_range=user_ranges["wave_period_s"],
-#                 wind_speed_range=user_ranges["wind_speed_kmh"],
-#                 wind_gust_range=user_ranges["wind_gust_kmh"],
-#             )
-
-#             out_file = f"windguru_forecast_{_slugify(title)}.png"
-#             scraper.plot_forecast(
-#                 ranges=user_ranges,
-#                 show_week_from=None,      # anchor to today 00:00 Lisbon by default
-#                 figsize=(20, 11),
-#                 marker_size=3.0,
-#                 line_width=1.0,
-#                 # styling (you can tweak these)
-#                 horiz_band_color="#bfdbfe",
-#                 horiz_band_alpha=0.35,
-#                 green_color="#22c55e",
-#                 yellow_color="#ffcd3c",
-#                 red_color="#fca5a5",      # lighter red
-#                 band_alpha=0.65,
-#                 save_path=out_file,
-#                 show=True,                # BLOCKING: one-by-one windows
-#             )
-#         except Exception as e:
-#             print(f"[{title}] Error: {e}")
