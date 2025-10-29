@@ -98,7 +98,7 @@ with st.sidebar:
         )
 
         # st.divider()
-        st.subheader("🌊 Sea Conditions")
+        st.subheader("🌊 Wave Conditions")
 
         col1, col2 = st.columns(2)
         with col1:
