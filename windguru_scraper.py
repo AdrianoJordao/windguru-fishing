@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -34,13 +33,17 @@ MODEL_NAMES: Dict[int, str] = {
 
 @dataclass
 class ForecastRecord:
-    """ Class that holds the forecast dor every hour """
+    """ Class that holds the forecast for every hour """
     model: str
     datetime: datetime  # stored as UTC-aware
     wave_height_m: Optional[float]
     wave_period_s: Optional[float]
     wind_speed_kmh: Optional[float]
     wind_gust_kmh: Optional[float]
+    # NEW VARIABLES
+    precipitation_mm: Optional[float]
+    temperature_c: Optional[float]
+    cloud_cover_pct: Optional[float]  # Using cloud cover as proxy when tide not available
 
 
 class WindguruScraper:
@@ -49,7 +52,7 @@ class WindguruScraper:
     def __init__(self, spot_url: str, spot_title_override: Optional[str] = None) -> None:
         self.spot_url: str = spot_url
         self.data: pd.DataFrame | None = None
-        self.spot_name: str | None = spot_title_override  # can be overridden by API if not provided
+        self.spot_name: str | None = spot_title_override
 
     # ------------------------------ Fetching ------------------------------
 
@@ -61,7 +64,7 @@ class WindguruScraper:
         return MODEL_NAMES.get(model_id, f"Model {model_id}")
 
     def _maybe_set_spot_name(self, payload: dict, spot_id: str) -> None:
-        if self.spot_name:  # already forced by caller or set earlier
+        if self.spot_name:
             return
         for key in ("spot_name", "spot", "location", "name", "spot_name_long"):
             val = payload.get(key)
@@ -87,7 +90,7 @@ class WindguruScraper:
         print("Attempting to fetch forecasts from multiple models…")
         all_forecasts: List[dict] = []
 
-        for mid in dict.fromkeys(model_ids):  # de-dup keep order
+        for mid in dict.fromkeys(model_ids):
             complete_url = f"https://www.windguru.net/int/iapi.php?q=forecast&id_model={mid}&id_spot={spot_id}"
             try:
                 print(f"  Fetching model {mid}…", end=" ")
@@ -134,20 +137,26 @@ class WindguruScraper:
                 print(f"  Warning: no 'hours' for {model_name}")
                 continue
 
+            # Existing variables
             HTSGW = fcst.get("HTSGW", [])
             PERPW = fcst.get("PERPW", [])
             WINDSPD = fcst.get("WINDSPD", [])
             GUST = fcst.get("GUST", [])
 
+            # NEW VARIABLES - multiple possible field names
+            APCP = fcst.get("APCP", fcst.get("PRECIP", fcst.get("RAIN", [])))  # precipitation
+            TMP = fcst.get("TMP", fcst.get("TMPE", []))  # air temperature
+            TCDC = fcst.get("TCDC", [])  # cloud cover (0-100%)
+
             print(
                 f"  {model_name}: {len(hours)}h, "
-                f"Wave Height={len(HTSGW)}, Wave period={len(PERPW)}, Wind Speed={len(WINDSPD)}, Wind Gust={len(GUST)}"
+                f"Wave={len(HTSGW)}, Period={len(PERPW)}, Wind={len(WINDSPD)}, Gust={len(GUST)}, "
+                f"Precip={len(APCP)}, Temp={len(TMP)}, Cloud={len(TCDC)}"
             )
 
             for i, hoff in enumerate(hours):
                 try:
                     ts = initstamp + hoff * 3600
-                    # Store as UTC-aware datetime to avoid DST ambiguity later
                     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
 
                     def val(arr: list, idx: int) -> Optional[float]:
@@ -161,6 +170,9 @@ class WindguruScraper:
                     wave_p = val(PERPW, i)
                     wind_s = val(WINDSPD, i)
                     wind_g = val(GUST, i)
+                    precip = val(APCP, i)
+                    temp = val(TMP, i)
+                    cloud = val(TCDC, i)
 
                     # knots -> km/h
                     if wind_s is not None:
@@ -176,6 +188,9 @@ class WindguruScraper:
                             wave_period_s=wave_p,
                             wind_speed_kmh=wind_s,
                             wind_gust_kmh=wind_g,
+                            precipitation_mm=precip,
+                            temperature_c=temp,
+                            cloud_cover_pct=cloud,
                         )
                     )
                 except Exception as e:
@@ -195,6 +210,9 @@ class WindguruScraper:
         wave_period_range: Tuple[float, float] = (0.0, 12.0),
         wind_speed_range: Tuple[float, float] = (0.0, 20.0),
         wind_gust_range: Tuple[float, float] = (0.0, 25.0),
+        precipitation_range: Tuple[float, float] = (0.0, 5.0),
+        temperature_range: Tuple[float, float] = (10.0, 35.0),
+        cloud_cover_range: Tuple[float, float] = (0.0, 100.0),
     ) -> pd.DataFrame:
         """ Filter user conditions """
 
@@ -206,8 +224,11 @@ class WindguruScraper:
         mask = (data_frame["wave_height_m"].between(*wave_height_range)
                 & data_frame["wave_period_s"].between(*wave_period_range)
                 & data_frame["wind_speed_kmh"].between(*wind_speed_range)
-                & data_frame["wind_gust_kmh"].between(*wind_gust_range))
-        filtered = data_frame.loc[mask].copy()
+                & data_frame["wind_gust_kmh"].between(*wind_gust_range)
+                & data_frame["precipitation_mm"].between(*precipitation_range)
+                & data_frame["temperature_c"].between(*temperature_range)
+                & data_frame["cloud_cover_pct"].between(*cloud_cover_range))
+        filtered: pd.DataFrame = data_frame.loc[mask].copy()
         print(f"\nFiltered to {len(filtered)} records matching criteria.")
         return filtered
 
@@ -216,31 +237,22 @@ class WindguruScraper:
     def plot_forecast(
         self,
         show_week_from: Optional[datetime] = None,
-        figsize: Tuple[int, int] = (20, 13),
+        figsize: Tuple[int, int] = (20, 16),
         marker_size: float = 3.0,
         line_width: float = 1.0,
         ranges: Dict[str, Tuple[float, float]] | None = None,
         # Styling
-        horiz_band_color: str = "#bfdbfe",   # pale blue
+        horiz_band_color: str = "#bfdbfe",
         horiz_band_alpha: float = 0.50,
-        green_color: str = "#22c55e",        # really green
-        yellow_color: str = "#ffcd3c",       # lively yellow
-        red_color: str = "#fca5a5",          # light red
+        green_color: str = "#22c55e",
+        yellow_color: str = "#ffcd3c",
+        red_color: str = "#fca5a5",
         band_alpha: float = 0.65,
         save_path: Optional[str] = None,
-        show: bool = True,                   # BLOCKING: show one-by-one
+        show: bool = True,
     ) -> None:
         """
-        1) For each model, resample to HOURLY from start->end of the displayed week (UTC):
-        - reindex to hourly DatetimeIndex
-        - interpolate(method='time') then bfill/ffill to edges
-        2) Per-hour MEAN across models (for each variable). New first subplot shows the four
-        mean lines (one per variable).
-        3) Vertical color bands are computed from those MEAN values:
-        - GREEN  : all present variables' means within thresholds
-        - YELLOW : exactly one present variable's mean outside but within 20% of nearest bound
-        - RED    : otherwise (incl. zero variables present)
-        4) Variable subplots (4) still show each model's line, now using interpolated series.
+        Plot forecast with 8 subplots: MEAN + 7 variables (including new ones)
         """
         if self.data is None or self.data.empty:
             print("No data to plot.")
@@ -258,7 +270,7 @@ class WindguruScraper:
             print("No valid datetimes to plot after coercion.")
             return
 
-        # --- Determine plotting window (local) and corresponding UTC hourly index ---
+        # --- Determine plotting window ---
         now_pt = datetime.now(tz_pt)
         if show_week_from is None:
             start_local = now_pt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -271,7 +283,7 @@ class WindguruScraper:
         end_utc = pd.Timestamp(end_local).tz_convert("UTC")
         hourly_index_utc = pd.date_range(start=start_utc, end=end_utc, freq="h", inclusive="left")
 
-        # Clamp window if completely outside data range (reuse original behavior)
+        # Clamp window if completely outside data range
         data_min_local = base["datetime"].dt.tz_convert(tz_pt).min()
         data_max_local = base["datetime"].dt.tz_convert(tz_pt).max()
         if end_local <= start_local or end_local < data_min_local or start_local > data_max_local:
@@ -283,41 +295,31 @@ class WindguruScraper:
             print("Adjusted x-window to local data range:", start_local, "→", end_local)
 
         # ---------------------------------------------------------------------------------
-        # 1) INTERPOLATE EACH MODEL to hourly over the window (UTC) — NO EXTRAPOLATION
-        #    • Interpolate per variable
-        #    • Only between that variable's first/last known timestamps for the model
-        #    • Outside that span -> NaN (not present)
+        # 1) INTERPOLATE EACH MODEL to hourly
         # ---------------------------------------------------------------------------------
-        vars_cols = ["wave_height_m", "wave_period_s", "wind_speed_kmh", "wind_gust_kmh"]
+        vars_cols = ["wave_height_m", "wave_period_s", "wind_speed_kmh", "wind_gust_kmh",
+                     "precipitation_mm", "temperature_c", "cloud_cover_pct"]
 
         interpolated: List[pd.DataFrame] = []
         for model, g in base.groupby("model", sort=False):
             g = g.set_index("datetime").sort_index()
-
-            # Result container on the global hourly index (all NaN by default)
             gi = pd.DataFrame(index=hourly_index_utc, columns=vars_cols, dtype="float64")
 
             for col in vars_cols:
                 s = g[col].dropna()
                 if s.empty:
-                    # model has no data for this variable anywhere -> keep NaN
                     continue
 
-                # Limit to this variable's data span
                 t0, t1 = s.index.min(), s.index.max()
-
-                # Build an index that includes both original points and hourly points within [t0, t1]
                 hourly_span = hourly_index_utc[(hourly_index_utc >= t0) & (hourly_index_utc <= t1)]
                 idx = s.index.union(hourly_span)
 
-                # Interpolate in time on the combined index, then select only hourly points in-span
                 s_interp = (
                     s.reindex(idx)
-                    .interpolate(method="time")   # fills only between known points
-                    .reindex(hourly_span)         # keep hourly points within [t0, t1]
+                    .interpolate(method="time")
+                    .reindex(hourly_span)
                 )
 
-                # Write into the model's hourly frame (outside [t0, t1] stays NaN)
                 gi.loc[hourly_span, col] = s_interp.values
 
             gi["model"] = model
@@ -325,18 +327,18 @@ class WindguruScraper:
 
         interp_df = pd.concat(interpolated, axis=0)
         interp_df.index.name = "datetime"
-        interp_df.reset_index(inplace=True)   # 'datetime' remains UTC-aware
+        interp_df.reset_index(inplace=True)
         interp_df["dt_local"] = interp_df["datetime"].dt.tz_convert(tz_pt)
 
         # ---------------------------------------------------------------------------------
-        # 2) HOURLY MEAN across models (UTC)
+        # 2) HOURLY MEAN across models
         # ---------------------------------------------------------------------------------
         means_utc = (
             interp_df
             .set_index("datetime")
             .groupby(level=0)[vars_cols]
             .mean()
-            .reindex(hourly_index_utc)   # ensure full hourly coverage
+            .reindex(hourly_index_utc)
         )
         means_local = means_utc.copy()
         means_local["dt_local"] = means_utc.index.tz_convert(tz_pt)
@@ -345,19 +347,13 @@ class WindguruScraper:
         # 3) Build vertical bands from MEAN values
         # ---------------------------------------------------------------------------------
         def rel_dev_to_bound(val: float, lo: float, hi: float) -> float:
-            """
-            Relative deviation to the nearest bound, normalized ONLY by the variable's range (hi - lo).
-            Returns 0 if inside range. If hi==lo, treat any outside value as +inf and inside as 0.
-            """
             if pd.isna(val):
                 return float("inf")
             rng = float(hi) - float(lo)
             if rng <= 0:
-                # degenerate range; inside -> 0, outside -> inf
                 return 0.0 if (lo <= val <= hi) else float("inf")
             if lo <= val <= hi:
                 return 0.0
-            # distance to the nearest bound divided by range
             if val > hi:
                 return (float(val) - float(hi)) / rng
             else:
@@ -379,14 +375,14 @@ class WindguruScraper:
                 status = "green"
             elif n_ok == n_present - 1 and n_present >= 1:
                 off = [c for c in present_list if not ok_map[c]]
-                c = off[0]  # single offender
+                c = off[0]
                 status = "yellow" if rel_dev_to_bound(row[c], *ranges[c]) <= 0.20 else "red"
             else:
                 status = "red"
 
             hour_status[ts] = status
 
-        # Merge consecutive hours with same status; convert span edges to local
+        # Merge consecutive hours
         hourly_spans_local: List[Tuple[datetime, datetime, str]] = []
         cur_status: Optional[str] = None
         span_start: Optional[pd.Timestamp] = None
@@ -402,22 +398,21 @@ class WindguruScraper:
                 cur_status = s
                 span_start = ts
             elif s != cur_status:
-                flush_span(span_start, ts, cur_status)  # type: ignore[arg-type]
+                flush_span(span_start, ts, cur_status)
                 cur_status = s
                 span_start = ts
         if cur_status is not None and span_start is not None:
             flush_span(span_start, hourly_index_utc[-1] + pd.Timedelta(hours=1), cur_status)
 
         # ---------------------------------------------------------------------------------
-        # 4) PLOTTING
+        # 4) PLOTTING - 8 subplots total
         # ---------------------------------------------------------------------------------
         title_name = self.spot_name or f"Spot {self.spot_url.rstrip('/').split('/')[-1]}"
 
-        # 5 subplots: [MEAN] + 4 variable panes
-        fig, axes = plt.subplots(5, 1, figsize=figsize, sharex=True)
-        ax_mean, ax_h, ax_p, ax_ws, ax_wg = axes
+        fig, axes = plt.subplots(8, 1, figsize=figsize, sharex=True)
+        ax_mean, ax_wave_height, ax_wave_period, ax_wind_speed, ax_wind_gust, ax_precipitation, ax_temperature, ax_cloud_cover = axes
 
-        # Vertical bands first (background) on all axes
+        # Vertical bands on all axes
         if hourly_spans_local:
             def paint_vertical(ax) -> None:
                 for (t0, t1, status) in hourly_spans_local:
@@ -426,28 +421,29 @@ class WindguruScraper:
             for ax in axes:
                 paint_vertical(ax)
 
-        # ---- Mean plot (one line per variable) ----
-        # (Units differ; legend clarifies)
-        ax_mean.plot(means_local["dt_local"], means_utc["wave_height_m"], label="Mean wave_height (m)", marker="o", markersize=marker_size, linewidth=line_width, alpha=0.9, zorder=5)
-        ax_mean.plot(means_local["dt_local"], means_utc["wave_period_s"], label="Mean wave_period (s)", marker="o", markersize=marker_size, linewidth=line_width, alpha=0.9, zorder=5)
-        ax_mean.plot(means_local["dt_local"], means_utc["wind_speed_kmh"], label="Mean wind_speed (km/h)", marker="o", markersize=marker_size, linewidth=line_width, alpha=0.9, zorder=5)
-        ax_mean.plot(means_local["dt_local"], means_utc["wind_gust_kmh"], label="Mean wind_gust (km/h)", marker="o", markersize=marker_size, linewidth=line_width, alpha=0.9, zorder=5)
-        ax_mean.set_ylabel("Hourly mean of available models")
-        ax_mean.legend(loc="upper left", ncol=2, fontsize=9, frameon=False)
+        # ---- Mean plot ----
+        ax_mean.plot(means_local["dt_local"], means_utc["wave_height_m"], label="Wave height (m)")
+        ax_mean.plot(means_local["dt_local"], means_utc["wave_period_s"], label="Wave period (s)")
+        ax_mean.plot(means_local["dt_local"], means_utc["wind_speed_kmh"], label="Wind speed (km/h)")
+        ax_mean.plot(means_local["dt_local"], means_utc["wind_gust_kmh"], label="Wind gust (km/h)")
+        ax_mean.plot(means_local["dt_local"], means_utc["precipitation_mm"], label="Precipitation (mm)")
+        ax_mean.plot(means_local["dt_local"], means_utc["temperature_c"], label="Temperature (°C)")
+        ax_mean.plot(means_local["dt_local"], means_utc["cloud_cover_pct"], label="Cloud cover (%)")
+
+        # ax_mean.set_ylabel("")
+        ax_mean.set_title("Mean of available models", loc="center", pad=8)
+        ax_mean.legend(loc="upper right", ncol=3, fontsize=7, frameon=False)
         ax_mean.grid(True, alpha=0.35, zorder=2)
 
-        # ---- Per-variable panes (each model’s interpolated line) ----
+        # ---- Per-variable panes ----
         def plot_variable(ax, col: str, ylabel: str) -> None:
-            # horizontal threshold band
             if ranges and col in ranges:
                 ymin, ymax = ranges[col]
                 ax.axhspan(ymin, ymax, color=horiz_band_color, alpha=horiz_band_alpha, lw=0, zorder=1)
 
             for model, g in interp_df.groupby("model", sort=False):
                 s = g[col]
-
-                # ---- key change: skip models with no data for this variable ----
-                if not s.notna().any():        # all NaN -> nothing to plot, no legend entry
+                if not s.notna().any():
                     continue
 
                 ax.plot(
@@ -461,32 +457,70 @@ class WindguruScraper:
                     zorder=5,
                 )
 
-            ax.set_ylabel(ylabel)
+            # AFTER
+            # ax.set_ylabel("")
+            ax.set_title(ylabel, loc="center", pad=6)
             ax.grid(True, alpha=0.35, zorder=2)
 
-            # Optional: make sure legend only contains visible handles
             handles, labels = ax.get_legend_handles_labels()
             if handles:
-                ax.legend(handles, labels, loc="upper left", ncol=2, fontsize=9, frameon=False)
+                ax.legend(handles, labels, loc="upper left", ncol=2, fontsize=8, frameon=False)
 
-        plot_variable(ax_h, "wave_height_m", "Wave Height (m)")
-        plot_variable(ax_p, "wave_period_s", "Wave Period (s)")
-        plot_variable(ax_ws, "wind_speed_kmh", "Wind Speed (km/h)")
-        plot_variable(ax_wg, "wind_gust_kmh", "Wind Gusts (km/h)")
+        plot_variable(ax_wave_height, "wave_height_m", "Wave Height (m)")
+        plot_variable(ax_wave_period, "wave_period_s", "Wave Period (s)")
+        plot_variable(ax_wind_speed, "wind_speed_kmh", "Wind Speed (km/h)")
+        plot_variable(ax_wind_gust, "wind_gust_kmh", "Wind Gusts (km/h)")
+        plot_variable(ax_precipitation, "precipitation_mm", "Precipitation (mm)")
+        plot_variable(ax_temperature, "temperature_c", "Temperature (°C)")
+        plot_variable(ax_cloud_cover, "cloud_cover_pct", "Cloud Cover (%)")
 
-        # X-lims on all
+        # Wave height subplot mean line
+        ax_wave_height.plot(means_local["dt_local"], means_utc["wave_height_m"], color="black", label="Mean (available models)")
+        ax_wave_height.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # Wave period subplot mean line
+        ax_wave_period.plot(means_local["dt_local"], means_utc["wave_period_s"], color="black", label="Mean (available models)")
+        ax_wave_period.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # Wind speed subplot mean line
+        ax_wind_speed.plot(means_local["dt_local"], means_utc["wind_speed_kmh"], color="black", label="Mean (available models)")
+        ax_wind_speed.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # Wind gust subplot mean line
+        ax_wind_gust.plot(means_local["dt_local"], means_utc["wind_gust_kmh"], color="black", label="Mean (available models)")
+        ax_wind_gust.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # Precipitation subplot mean line
+        ax_precipitation.plot(means_local["dt_local"], means_utc["precipitation_mm"], color="black", label="Mean (available models)")
+        ax_precipitation.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # Temperature subplot mean line
+        ax_temperature.plot(means_local["dt_local"], means_utc["temperature_c"], color="black", label="Mean (available models)")
+        ax_temperature.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # Cloud cover subplot mean line
+        ax_cloud_cover.plot(means_local["dt_local"], means_utc["cloud_cover_pct"], color="black", label="Mean (available models)")
+        ax_cloud_cover.legend(loc="upper right", fontsize=7, ncol=2, frameon=False)
+
+        # X-lims on all — align to day boundaries so 00:00 is inside the range
+        xmin = pd.to_datetime(means_local["dt_local"].min()).floor("D")
+        xmax = pd.to_datetime(means_local["dt_local"].max()).ceil("D")
         for ax in axes:
-            ax.set_xlim(start_local, end_local)
+            ax.set_xlim(xmin, xmax)
 
-        # Bottom (hours) on last subplot
-        ax_wg.xaxis.set_major_locator(mdates.DayLocator())
-        ax_wg.xaxis.set_major_formatter(NullFormatter())  # hide day labels at bottom
-        ax_wg.xaxis.set_minor_locator(mdates.HourLocator(interval=3))
-        ax_wg.xaxis.set_minor_formatter(mdates.DateFormatter("%Hh", tz=tz_pt))
-        ax_wg.tick_params(axis="x", which="minor", pad=2)
-        ax_wg.set_xlabel("Time (hours)")
+        # Bottom axis (labels every 3h, explicitly including 00h)
+        ax_cloud_cover.xaxis.set_major_locator(
+            mdates.HourLocator(byhour=[0, 3, 6, 9, 12, 15, 18, 21], tz=tz_pt)
+        )
+        ax_cloud_cover.xaxis.set_major_formatter(mdates.DateFormatter("%Hh", tz=tz_pt))
 
-        # Top (days) on first subplot
+        # Optional: faint minor grid each hour
+        ax_cloud_cover.xaxis.set_minor_locator(mdates.HourLocator(interval=1, tz=tz_pt))
+        ax_cloud_cover.grid(True, which="minor", alpha=0.12)
+
+        ax_cloud_cover.set_xlabel("Time (hours)")
+
+        # Top axis
         try:
             ax_top = ax_mean.secondary_xaxis("top")
         except AttributeError:
@@ -500,10 +534,10 @@ class WindguruScraper:
 
         plt.tight_layout(rect=(0, 0, 1, 0.98))
         out_path = save_path or "windguru_forecast.png"
-        plt.savefig(out_path, dpi=170, bbox_inches="tight")
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
         print(f"\nPlot saved as '{out_path}'")
 
         if show:
-            plt.show()  # BLOCKS for this beach
+            plt.show()
         else:
             plt.close(fig)
