@@ -144,7 +144,7 @@ class WindguruScraper:
             GUST = fcst.get("GUST", [])
 
             # NEW VARIABLES - multiple possible field names
-            APCP = fcst.get("APCP", fcst.get("PRECIP", fcst.get("RAIN", [])))  # precipitation
+            APCP = fcst.get("APCP", fcst.get("PRECIP", fcst.get("RAIN", fcst.get("PCPT", fcst.get("APCP", fcst.get("APCP1", []))))))  # precipitation
             TMP = fcst.get("TMP", fcst.get("TMPE", []))  # air temperature
             TCDC = fcst.get("TCDC", [])  # cloud cover (0-100%)
 
