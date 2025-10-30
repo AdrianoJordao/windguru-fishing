@@ -237,7 +237,7 @@ with st.sidebar:
             )
 
         # Submit button
-        submitted = st.form_submit_button("🎣 Check Forecast", use_container_width=True)
+        submitted = st.form_submit_button("🎣 Check Forecast", width='stretch')
 
 # Main content area
 if submitted:
@@ -320,7 +320,7 @@ if submitted:
                         )
 
                         # Display the image
-                        st.image("temp_forecast.png", use_container_width=True)
+                        st.image("temp_forecast.png", width='stretch')
 
                         # Offer download
                         with open("temp_forecast.png", "rb") as file:
@@ -343,7 +343,7 @@ if submitted:
                         tz_pt = ZoneInfo("Europe/Lisbon")
                         display_df['local_time'] = display_df['datetime'].dt.tz_convert(tz_pt)  # pyright: ignore[reportGeneralTypeIssues]
                         display_df: DataFrame = display_df[['local_time', 'model', 'wave_height_m', 'wave_period_s', 'wind_speed_kmh', 'wind_gust_kmh', 'precipitation_mm', 'temperature_c', 'cloud_cover_pct']]
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+                        st.dataframe(display_df, width='stretch', hide_index=True)
 
                 # Debug output
                 with st.expander("🔍 Debug Output"):
