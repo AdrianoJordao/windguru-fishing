@@ -53,7 +53,7 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        .block-container { padding-top: 0.5rem !important; }
+        .block-container { padding-top: 3rem !important; }
         h1 { margin-top: 0rem !important; margin-bottom: 0.5rem !important; }
         section[data-testid="stSidebar"] { width: 420px !important; }
     </style>
@@ -112,7 +112,7 @@ st.session_state.setdefault("tide_lon", "")
 st.session_state.setdefault("has_results", False)
 
 # ------------------------------ Header: title + language toggle ------------------------------
-head_left, head_right = st.columns([5, 1], vertical_alignment="center")
+head_left, head_right = st.columns([4, 1], vertical_alignment="center")
 with head_left:
     st.title(t("title", lang))
 with head_right:
