@@ -385,7 +385,7 @@ def good_hours(plot_data: PlotData, tz: tzinfo = LOCAL_TZ,
     mask = plot_data.status.isin(keep)
     out = plot_data.means.loc[mask, VARIABLE_COLS].round(1)
     out.insert(0, "status", plot_data.status[mask])
-    out.insert(0, "local_time", out.index.tz_convert(tz).strftime("%a %d/%m %H:%M"))
+    out.insert(0, "local_time", out.index.tz_convert(tz))
     return out.reset_index(drop=True)
 
 

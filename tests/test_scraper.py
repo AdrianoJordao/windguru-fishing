@@ -82,6 +82,7 @@ def test_prepare_plot_data_and_good_hours():
     assert pd_.status.iloc[30] == "red"
     gh = good_hours(pd_)
     assert set(gh["status"]) <= {"green", "yellow"}
+    assert str(gh["local_time"].dt.tz) == "Europe/Lisbon"
     assert len(gh) == int(pd_.status.isin(["green", "yellow"]).sum())
 
     windows = best_windows(pd_, min_hours=2)

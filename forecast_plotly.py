@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from config import DEFAULT_RANGES, LOCAL_TZ, VARIABLES
+from i18n import DEFAULT_LANG, fmt_day, t
 from windguru_scraper import PlotData
 
 STATUS_COLORS = {"green": "#22c55e", "yellow": "#facc15", "red": "#f87171"}
@@ -34,13 +35,15 @@ def build_figure(plot_data: PlotData,
                  tide_curve: Optional[pd.Series] = None,
                  tide_extremes: Optional[pd.DataFrame] = None,
                  title: str = "",
-                 tz: tzinfo = LOCAL_TZ) -> go.Figure:
+                 tz: tzinfo = LOCAL_TZ,
+                 lang: str = DEFAULT_LANG) -> go.Figure:
     ranges = ranges or DEFAULT_RANGES
 
     def _local(idx) -> pd.DatetimeIndex:
         return to_local_naive(idx, tz)
 
-    titles = [f"{v.label} ({v.unit})" for v in VARIABLES] + ["Tide (cm)"]
+    titles = [f"{t(f'var.{v.col}.label', lang)} ({v.unit})" for v in VARIABLES] + [t("chart.tide_panel", lang)]
+    mean_name, mean_short = t("chart.mean", lang), t("chart.mean_short", lang)
     n_rows = len(titles)
     fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True,
                         vertical_spacing=0.025, subplot_titles=titles)
@@ -75,10 +78,10 @@ def build_figure(plot_data: PlotData,
 
         if var.col in plot_data.means and plot_data.means[var.col].notna().any():
             fig.add_trace(go.Scatter(
-                x=x_mean, y=plot_data.means[var.col], name="Mean (all models)",
+                x=x_mean, y=plot_data.means[var.col], name=mean_name,
                 legendgroup="mean", showlegend="mean" not in shown_in_legend,
                 mode="lines", line=dict(width=2.2, color=MEAN_COLOR),
-                hovertemplate=f"<b>Mean: %{{y:.1f}} {var.unit}</b><extra></extra>",
+                hovertemplate=f"<b>{mean_short}: %{{y:.1f}} {var.unit}</b><extra></extra>",
             ), row=row, col=1)
             shown_in_legend.add("mean")
 
@@ -90,10 +93,10 @@ def build_figure(plot_data: PlotData,
         if plot_data.start is not None and plot_data.end is not None:
             curve = curve[(curve.index >= plot_data.start) & (curve.index <= plot_data.end)]
         fig.add_trace(go.Scatter(
-            x=_local(curve.index), y=curve.values, name="Tide",
+            x=_local(curve.index), y=curve.values, name=t("chart.tide", lang),
             mode="lines", line=dict(width=2, color=TIDE_COLOR), fill="tozeroy",
             fillcolor="rgba(14, 116, 144, 0.10)",
-            hovertemplate="Tide: %{y:.0f} cm<extra></extra>",
+            hovertemplate=f"{t('chart.tide', lang)}: %{{y:.0f}} cm<extra></extra>",
         ), row=tide_row, col=1)
 
         if tide_extremes is not None and not tide_extremes.empty:
@@ -106,18 +109,19 @@ def build_figure(plot_data: PlotData,
                 if e.empty:
                     continue
                 x = _local(e["time"])
+                kind_name = t(f"tide.{kind}", lang)
                 fig.add_trace(go.Scatter(
-                    x=x, y=e["height_cm"], name=f"{kind} tide", showlegend=False,
+                    x=x, y=e["height_cm"], name=kind_name, showlegend=False,
                     mode="markers+text", marker=dict(symbol=symbol, size=9, color=TIDE_COLOR),
                     text=[f"{t:%H:%M}<br>{h:+.0f}" for t, h in zip(x, e["height_cm"])],
                     textposition=pos, textfont=dict(size=10),
-                    hovertemplate=f"{kind} tide %{{x|%H:%M}}: %{{y:+.0f}} cm<extra></extra>",
+                    hovertemplate=f"{kind_name} %{{x|%H:%M}}: %{{y:+.0f}} cm<extra></extra>",
                 ), row=tide_row, col=1)
             lo, hi = float(curve.min()), float(curve.max())
             pad = max(25.0, 0.35 * (hi - lo))
             fig.update_yaxes(range=[lo - pad, hi + pad], row=tide_row, col=1)
     else:
-        fig.add_annotation(text="No tide data", showarrow=False, font=dict(color="gray"),
+        fig.add_annotation(text=t("chart.no_tide", lang), showarrow=False, font=dict(color="gray"),
                            xref=f"x{tide_row} domain", yref=f"y{tide_row} domain", x=0.5, y=0.5)
 
     # ---------------- Good / near / bad hours behind every panel ----------------
@@ -135,7 +139,7 @@ def build_figure(plot_data: PlotData,
                 fig.add_vline(x=day, line_width=1, line_dash="dot", line_color="gray",
                               opacity=0.6, row="all", col=1)
             fig.add_annotation(x=day + pd.Timedelta(hours=12), y=1.0, xref="x", yref="paper",
-                               yanchor="bottom", yshift=22, text=f"<b>{day:%a %d/%m}</b>", showarrow=False,
+                               yanchor="bottom", yshift=22, text=f"<b>{fmt_day(day, lang)}</b>", showarrow=False,
                                font=dict(size=12))
         fig.update_xaxes(range=[first, _local([plot_data.end])[0]])
 
