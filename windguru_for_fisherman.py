@@ -189,9 +189,13 @@ def close_sidebar() -> None:
     components.html(f"""
         <script>
         // call {st.session_state["_close_sidebar_n"]}
-        // The collapse button only exists while the sidebar is open
-        const btn = window.parent.document.querySelector('[data-testid="stSidebarCollapseButton"] button');
-        if (btn) btn.click();
+        // Only click "close" if the sidebar is actually on screen; on some
+        // Streamlit versions the same button would open a closed sidebar.
+        const doc = window.parent.document;
+        const sidebar = doc.querySelector('section[data-testid="stSidebar"]');
+        const r = sidebar ? sidebar.getBoundingClientRect() : null;
+        const btn = doc.querySelector('[data-testid="stSidebarCollapseButton"] button');
+        if (r && r.width > 0 && r.right > 0 && btn) btn.click();
         </script>
     """, height=0)
 
