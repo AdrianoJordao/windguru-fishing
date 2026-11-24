@@ -1,15 +1,23 @@
 """
-    A small script to calculate a good day for fishing based on same data provided bu windguru
+    A small app to find good days for fishing based on data provided by Windguru
     Created on:      23-Oct-2025
-    Original author: Adriano Jordão (adriano.jordao@gmail.com)
+    Original author: Adriano Jordão
 """
 
-import io
-from zoneinfo import ZoneInfo
-import sys
-from pandas import DataFrame
+from __future__ import annotations
+
+from itertools import groupby
+from typing import Optional, Tuple
+
+import pandas as pd
 import streamlit as st
-from windguru_scraper import WindguruScraper
+
+from config import (DEFAULT_SPOT_NAME, DEFAULT_SPOT_URL, KNOWN_SPOTS, LOCAL_TZ,
+                    VARIABLES)
+from forecast_plotly import build_figure
+from tides import fetch_tide_curve, find_extremes
+from windguru_scraper import (WindguruScraper, best_windows, good_hours,
+                              parse_spot_id, prepare_plot_data)
 
 # Page configuration
 st.set_page_config(
@@ -22,337 +30,193 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        /* Remove top padding before the main title */
-        .block-container {
-            padding-top: 0.5rem !important;
-        }
-        /* Reduce bottom margin after the title */
-        h1 {
-            margin-top: 0rem !important;
-            margin-bottom: 0.5rem !important;
-        }
+        .block-container { padding-top: 0.5rem !important; }
+        h1 { margin-top: 0rem !important; margin-bottom: 0.5rem !important; }
+        section[data-testid="stSidebar"] { width: 420px !important; }
     </style>
     """,
     unsafe_allow_html=True
 )
 
-# Custom CSS to make sidebar wider
-st.markdown("""
-    <style>
-        section[data-testid="stSidebar"] {
-            width: 420px !important;
-        }
-    </style>
-""", unsafe_allow_html=True)
+
+# ------------------------------ Cached data loaders ------------------------------
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_forecast(spot_id: str, spot_url: str):
+    """ Windguru forecast for a spot, cached for 30 min so we don't hammer Windguru """
+    scraper = WindguruScraper(spot_url)
+    df = scraper.fetch_data()
+    return df, scraper.spot_name, scraper.lat, scraper.lon, scraper.messages
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_tides(lat: float, lon: float) -> Tuple[pd.Series, pd.DataFrame]:
+    curve = fetch_tide_curve(lat, lon)
+    return curve, find_extremes(curve)
+
+
+def resolve_tide_coords(spot_id: str, lat_text: str, lon_text: str,
+                        payload_lat: Optional[float], payload_lon: Optional[float]
+                        ) -> Optional[Tuple[float, float, str]]:
+    """ Manual input first, then Windguru's coordinates, then the known spots table """
+    if lat_text.strip() and lon_text.strip():
+        try:
+            return float(lat_text.replace(",", ".")), float(lon_text.replace(",", ".")), "manual"
+        except ValueError:
+            st.warning("⚠️ Tide latitude/longitude are not valid numbers. Ignoring them.")
+    if payload_lat is not None and payload_lon is not None:
+        return payload_lat, payload_lon, "Windguru"
+    if spot_id in KNOWN_SPOTS:
+        _, lat, lon = KNOWN_SPOTS[spot_id]
+        return lat, lon, "built-in"
+    return None
+
+
+# ------------------------------ Session state defaults ------------------------------
+
+for var in VARIABLES:
+    st.session_state.setdefault(f"{var.col}_min", var.default[0])
+    st.session_state.setdefault(f"{var.col}_max", var.default[1])
+st.session_state.setdefault("spot_url", DEFAULT_SPOT_URL)
+st.session_state.setdefault("spot_name", DEFAULT_SPOT_NAME)
+st.session_state.setdefault("tide_lat", "")
+st.session_state.setdefault("tide_lon", "")
+st.session_state.setdefault("has_results", False)
 
 # Title
 st.title("🎣 Windguru Fishing Forecast")
 st.markdown("Find the best days for fishing based on weather conditions")
 
-# Initialize session state for form values
-if 'wave_height_min' not in st.session_state:
-    st.session_state.wave_height_min = 0.0
-if 'wave_height_max' not in st.session_state:
-    st.session_state.wave_height_max = 1.6
-if 'wave_period_min' not in st.session_state:
-    st.session_state.wave_period_min = 0.0
-if 'wave_period_max' not in st.session_state:
-    st.session_state.wave_period_max = 12.0
-if 'wind_speed_min' not in st.session_state:
-    st.session_state.wind_speed_min = 0.0
-if 'wind_speed_max' not in st.session_state:
-    st.session_state.wind_speed_max = 20.0
-if 'wind_gust_min' not in st.session_state:
-    st.session_state.wind_gust_min = 0.0
-if 'wind_gust_max' not in st.session_state:
-    st.session_state.wind_gust_max = 25.0
-if 'precipitation_min' not in st.session_state:
-    st.session_state.precipitation_min = 0.0
-if 'precipitation_max' not in st.session_state:
-    st.session_state.precipitation_max = 2.0
-if 'temperature_min' not in st.session_state:
-    st.session_state.temperature_min = 12.0
-if 'temperature_max' not in st.session_state:
-    st.session_state.temperature_max = 35.0
-if 'cloud_cover_min' not in st.session_state:
-    st.session_state.cloud_cover_min = 0.0
-if 'cloud_cover_max' not in st.session_state:
-    st.session_state.cloud_cover_max = 100.0
-if 'spot_url' not in st.session_state:
-    st.session_state.spot_url = "https://www.windguru.cz/65000"
-if 'spot_name' not in st.session_state:
-    st.session_state.spot_name = "Sesimbra"
-
-# Sidebar with form
+# ------------------------------ Sidebar form ------------------------------
 with st.sidebar:
     st.header("⚙️ Configuration")
 
     with st.form("fishing_params"):
         st.subheader("📍 Location")
-        spot_name: str = st.text_input("Spot Name", value=st.session_state.spot_name, help="Name for your fishing spot")
+        st.text_input("Spot Name", key="spot_name", help="Name for your fishing spot")
+        st.text_input("Windguru URL", key="spot_url",
+                      help="Full URL from windguru.cz (e.g., https://www.windguru.cz/65000)")
 
-        spot_url = st.text_input(
-            "Windguru URL",
-            value=st.session_state.spot_url,
-            help="Full URL from windguru.cz (e.g., https://www.windguru.cz/65000)"
-        )
+        with st.expander("🌊 Tide location (optional)"):
+            st.caption("Leave empty to use the spot's coordinates.")
+            c1, c2 = st.columns(2)
+            c1.text_input("Latitude", key="tide_lat", placeholder="38.43")
+            c2.text_input("Longitude", key="tide_lon", placeholder="-9.10")
 
-        # st.divider()
-        st.subheader("🌊 Wave Conditions")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            wave_height_min = st.number_input(
-                "Min Height (m)",
-                min_value=0.0,
-                max_value=10.0,
-                value=st.session_state.wave_height_min,
-                step=0.1
-            )
-        with col2:
-            wave_height_max = st.number_input(
-                "Max Height (m)",
-                min_value=0.0,
-                max_value=10.0,
-                value=st.session_state.wave_height_max,
-                step=0.1
-            )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            wave_period_min = st.number_input(
-                "Min Period (s)",
-                min_value=0.0,
-                max_value=30.0,
-                value=st.session_state.wave_period_min,
-                step=1.0
-            )
-        with col2:
-            wave_period_max = st.number_input(
-                "Max Period (s)",
-                min_value=0.0,
-                max_value=30.0,
-                value=st.session_state.wave_period_max,
-                step=1.0
-            )
-
-        # st.divider()
-        st.subheader("💨 Wind Conditions")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            wind_speed_min = st.number_input(
-                "Min Speed (km/h)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.wind_speed_min,
-                step=1.0
-            )
-        with col2:
-            wind_speed_max = st.number_input(
-                "Max Speed (km/h)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.wind_speed_max,
-                step=1.0
-            )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            wind_gust_min = st.number_input(
-                "Min Gust (km/h)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.wind_gust_min,
-                step=1.0
-            )
-        with col2:
-            wind_gust_max = st.number_input(
-                "Max Gust (km/h)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.wind_gust_max,
-                step=1.0
-            )
-
-        # st.divider()
-        st.subheader("🌧️ Weather Conditions")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            precipitation_min = st.number_input(
-                "Min Rain (mm)",
-                min_value=0.0,
-                max_value=50.0,
-                value=st.session_state.precipitation_min,
-                step=0.5,
-                help="Precipitation/rainfall in mm"
-            )
-        with col2:
-            precipitation_max = st.number_input(
-                "Max Rain (mm)",
-                min_value=0.0,
-                max_value=50.0,
-                value=st.session_state.precipitation_max,
-                step=0.5,
-                help="Typically want 0-2mm for good fishing"
-            )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            temperature_min = st.number_input(
-                "Min Temp (°C)",
-                min_value=-10.0,
-                max_value=50.0,
-                value=st.session_state.temperature_min,
-                step=1.0
-            )
-        with col2:
-            temperature_max = st.number_input(
-                "Max Temp (°C)",
-                min_value=-10.0,
-                max_value=50.0,
-                value=st.session_state.temperature_max,
-                step=1.0
-            )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            cloud_cover_min = st.number_input(
-                "Min Clouds (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.cloud_cover_min,
-                step=5.0,
-                help="Cloud cover percentage"
-            )
-        with col2:
-            cloud_cover_max = st.number_input(
-                "Max Clouds (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.cloud_cover_max,
-                step=5.0,
-                help="Some clouds can improve fishing"
-            )
-
-        # Submit button
-        submitted = st.form_submit_button("🎣 Check Forecast", width='stretch')
-
-# Main content area
-if submitted:
-    # Update session state
-    st.session_state.wave_height_min = wave_height_min
-    st.session_state.wave_height_max = wave_height_max
-    st.session_state.wave_period_min = wave_period_min
-    st.session_state.wave_period_max = wave_period_max
-    st.session_state.wind_speed_min = wind_speed_min
-    st.session_state.wind_speed_max = wind_speed_max
-    st.session_state.wind_gust_min = wind_gust_min
-    st.session_state.wind_gust_max = wind_gust_max
-    st.session_state.precipitation_min = precipitation_min
-    st.session_state.precipitation_max = precipitation_max
-    st.session_state.temperature_min = temperature_min
-    st.session_state.temperature_max = temperature_max
-    st.session_state.cloud_cover_min = cloud_cover_min
-    st.session_state.cloud_cover_max = cloud_cover_max
-    st.session_state.spot_url = spot_url
-    st.session_state.spot_name = spot_name
-
-    # Build ranges dictionary
-    user_ranges = {
-        "wave_height_m": (wave_height_min, wave_height_max),
-        "wave_period_s": (wave_period_min, wave_period_max),
-        "wind_speed_kmh": (wind_speed_min, wind_speed_max),
-        "wind_gust_kmh": (wind_gust_min, wind_gust_max),
-        "precipitation_mm": (precipitation_min, precipitation_max),
-        "temperature_c": (temperature_min, temperature_max),
-        "cloud_cover_pct": (cloud_cover_min, cloud_cover_max),
-    }
-
-    # Show loading spinner
-    with st.spinner(f"🌊 Fetching forecast for {spot_name}..."):
-        try:
-            # Capture print output
-            output_buffer = io.StringIO()
-            sys.stdout = output_buffer
-
-            # Create scraper and fetch data
-            scraper = WindguruScraper(spot_url, spot_title_override=spot_name)
-            df = scraper.fetch_data()
-
-            # Restore stdout
-            sys.stdout = sys.__stdout__
-
-            if df.empty:
-                st.error("❌ No forecast data retrieved. Please check the URL and try again.")
-                with st.expander("📋 Debug Output"):
-                    st.text(output_buffer.getvalue())
-            else:
-                # st.success(f"✅ Successfully fetched {len(df)} forecast records!")
-
-                # Filter conditions
-                filtered = scraper.filter_conditions(
-                    wave_height_range=user_ranges["wave_height_m"],
-                    wave_period_range=user_ranges["wave_period_s"],
-                    wind_speed_range=user_ranges["wind_speed_kmh"],
-                    wind_gust_range=user_ranges["wind_gust_kmh"],
-                    precipitation_range=user_ranges["precipitation_mm"],
-                    temperature_range=user_ranges["temperature_c"],
-                    cloud_cover_range=user_ranges["cloud_cover_pct"],
-                )
-
-                # Generate plot
-                with st.spinner("📊 Generating chart..."):
-                    try:
-                        # Generate plot (don't show, save to buffer)
-                        import matplotlib
-                        matplotlib.use('Agg')  # Use non-interactive backend
-
-                        scraper.plot_forecast(
-                            ranges=user_ranges,
-                            show_week_from=None,
-                            figsize=(17, 11),
-                            marker_size=3.0,
-                            line_width=1.0,
-                            save_path="temp_forecast.png",
-                            show=False  # Don't block
+        for group, group_vars in groupby(VARIABLES, key=lambda v: v.group):
+            st.subheader(group)
+            for var in group_vars:
+                col1, col2 = st.columns(2)
+                for column, bound in ((col1, "min"), (col2, "max")):
+                    with column:
+                        st.number_input(
+                            f"{bound.capitalize()} {var.short} ({var.unit})",
+                            min_value=var.input_min,
+                            max_value=var.input_max,
+                            step=var.step,
+                            key=f"{var.col}_{bound}",
+                            help=var.help,
                         )
 
-                        # Display the image
-                        st.image("temp_forecast.png", width='stretch')
+        submitted = st.form_submit_button("🎣 Check Forecast", width='stretch')
 
-                        # Offer download
-                        with open("temp_forecast.png", "rb") as file:
-                            st.download_button(
-                                label="📥 Download Chart",
-                                data=file,
-                                file_name=f"windguru_{spot_name.lower().replace(' ', '_')}.png",
-                                mime="image/png"
-                            )
-                    except FileNotFoundError as e:
-                        st.error(f"Error generating plot: {e}")
+if submitted:
+    st.session_state.has_results = True
 
-                st.success(f"✅ Successfully fetched {len(df)} forecast records!")
+# ------------------------------ Main content ------------------------------
+if st.session_state.has_results:
+    spot_url: str = st.session_state.spot_url
+    user_ranges = {v.col: (st.session_state[f"{v.col}_min"], st.session_state[f"{v.col}_max"])
+                   for v in VARIABLES}
+    bad = [v.label for v in VARIABLES if user_ranges[v.col][0] > user_ranges[v.col][1]]
+    if bad:
+        st.warning(f"⚠️ Min is larger than max for: {', '.join(bad)}")
 
-                # Show filtered data table
-                if not filtered.empty:
-                    with st.expander("📋 View Good Fishing Hours"):
-                        # Convert to local timezone for display
-                        display_df = filtered.copy()
-                        tz_pt = ZoneInfo("Europe/Lisbon")
-                        display_df['local_time'] = display_df['datetime'].dt.tz_convert(tz_pt)  # pyright: ignore[reportGeneralTypeIssues]
-                        display_df: DataFrame = display_df[['local_time', 'model', 'wave_height_m', 'wave_period_s', 'wind_speed_kmh', 'wind_gust_kmh', 'precipitation_mm', 'temperature_c', 'cloud_cover_pct']]
-                        st.dataframe(display_df, width='stretch', hide_index=True)
+    try:
+        spot_id = parse_spot_id(spot_url)
+    except ValueError as e:
+        st.error(f"❌ {e}")
+        st.stop()
 
-                # Debug output
-                with st.expander("🔍 Debug Output"):
-                    st.text(output_buffer.getvalue())
+    with st.spinner("🌊 Fetching forecast…"):
+        try:
+            df, api_spot_name, api_lat, api_lon, messages = load_forecast(spot_id, spot_url)
+        except Exception as e:  # network trouble shouldn't show a stack trace to users
+            st.error(f"❌ Could not fetch the forecast: {e}")
+            st.stop()
 
+    spot_name = st.session_state.spot_name.strip() or api_spot_name or f"Spot {spot_id}"
+
+    if df.empty:
+        st.error("❌ No forecast data retrieved. Please check the URL and try again.")
+        with st.expander("📋 Debug Output"):
+            st.text("\n".join(messages))
+        st.stop()
+
+    # ---- Tides (never block the forecast) ----
+    tide_curve, tide_extremes = None, None
+    coords = resolve_tide_coords(spot_id, st.session_state.tide_lat, st.session_state.tide_lon,
+                                 api_lat, api_lon)
+    if coords is None:
+        st.info("ℹ️ No coordinates for this spot, so no tides. "
+                "Add a latitude/longitude under *Tide location* in the sidebar.")
+    else:
+        try:
+            tide_curve, tide_extremes = load_tides(coords[0], coords[1])
+            if tide_curve.empty:
+                st.warning("⚠️ Tide data is unavailable right now.")
         except Exception as e:
-            sys.stdout = sys.__stdout__
-            st.error(f"❌ Error: {str(e)}")
-            st.exception(e)
+            st.warning(f"⚠️ Tide data is unavailable right now ({e}).")
+
+    plot_data = prepare_plot_data(df, user_ranges)
+
+    # ---- Best windows summary ----
+    windows = best_windows(plot_data, min_hours=2)
+    if windows:
+        st.success("**Best windows:** " + " · ".join(
+            f"{t0:%a %d/%m %H:%M} – {t1:%a %d/%m %H:%M} ({h} h)" if t1.date() != t0.date()
+            else f"{t0:%a %d/%m %H:%M}–{t1:%H:%M} ({h} h)" for t0, t1, h in windows[:8]))
+    else:
+        st.warning("No stretch of 2+ hours matches all your criteria. Check the yellow hours in the chart.")
+
+    # ---- Chart ----
+    fig = build_figure(plot_data, user_ranges, tide_curve, tide_extremes,
+                       title=f"Windguru Forecast – {spot_name}")
+    st.plotly_chart(fig, config={"displaylogo": False})
+    st.caption("🟢 all conditions in range · 🟡 one condition slightly out · 🔴 not recommended. "
+               "Click a model in the legend to hide it.")
+    if tide_curve is not None and not tide_curve.empty and coords:
+        st.caption(f"Tides: Open-Meteo marine model at {coords[0]:.3f}, {coords[1]:.3f} ({coords[2]} coordinates). "
+                   "Times are approximate (±30 min); not for navigation.")
+
+    st.download_button(
+        label="📥 Download Chart (interactive HTML)",
+        data=fig.to_html(include_plotlyjs="cdn", full_html=True),
+        file_name=f"windguru_{spot_name.lower().replace(' ', '_')}.html",
+        mime="text/html",
+        on_click="ignore",
+    )
+
+    # ---- Tables ----
+    hours_df = good_hours(plot_data)
+    if not hours_df.empty:
+        with st.expander(f"📋 Good Fishing Hours ({len(hours_df)})"):
+            labels = {v.col: f"{v.label} ({v.unit})" for v in VARIABLES}
+            st.dataframe(hours_df.rename(columns=labels), width='stretch', hide_index=True)
+
+    if tide_extremes is not None and not tide_extremes.empty:
+        with st.expander("🌊 Tide Table"):
+            tt = tide_extremes[(tide_extremes["time"] >= plot_data.start)
+                               & (tide_extremes["time"] <= plot_data.end)]
+            local = tt["time"].dt.tz_convert(LOCAL_TZ)
+            tt = pd.DataFrame({"Day": local.dt.strftime("%a %d/%m"),
+                               "Time": local.dt.strftime("%H:%M"),
+                               "Tide": tt["type"],
+                               "Height (cm)": tt["height_cm"].round(0).astype(int)})
+            st.dataframe(tt, width='stretch', hide_index=True)
+
+    with st.expander("🔍 Debug Output"):
+        st.text("\n".join(messages))
 else:
     # Welcome screen
     st.info("👈 Configure your fishing conditions in the sidebar and click '🎣 Check Forecast' to get started!")
@@ -361,17 +225,18 @@ else:
     ### How to use:
     1. **Enter your Windguru URL** - Find your spot on windguru.cz and copy the URL
     2. **Set your ideal conditions** - Define acceptable ranges for waves, wind, and weather
-    3. **Click Check Forecast** - Get a visual forecast with color-coded good/bad periods
+    3. **Click Check Forecast** - Get an interactive forecast with color-coded good/bad periods and tides
 
     ### Color coding:
     - 🟢 **Green**: All conditions within your ranges - perfect for fishing!
     - 🟡 **Yellow**: One condition slightly outside range - still manageable
     - 🔴 **Red**: Multiple conditions outside range - not recommended
 
-    ### New weather variables:
-    - 🌧️ **Precipitation**: Rain in mm (typically want 0-2mm)
+    ### Weather variables:
+    - 🌧️ **Precipitation**: Rain in mm per hour (typically want 0-2 mm/h)
     - 🌡️ **Temperature**: Air temperature in °C
     - ☁️ **Cloud Cover**: Percentage (some clouds can improve fishing!)
+    - 🌊 **Tides**: High and low tides for the spot
 
     ### Popular spots:
     - Sesimbra: `https://www.windguru.cz/65000`
@@ -381,4 +246,5 @@ else:
 
 # Footer
 st.divider()
-st.markdown("Made with ❤️ for fishermen by Adriano Jordão | Data from [Windguru](https://www.windguru.cz)")
+st.markdown("Made with ❤️ for fishermen by Adriano Jordão | Data from [Windguru](https://www.windguru.cz) "
+            "· Tides from [Open-Meteo](https://open-meteo.com)")
