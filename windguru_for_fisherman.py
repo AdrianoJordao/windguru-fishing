@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import (DEFAULT_SPOT_NAME, DEFAULT_SPOT_URL, KNOWN_SPOTS, LOCAL_TZ,
                     VARIABLES)
@@ -141,6 +142,23 @@ def week_table(plot_data, tide_extremes) -> pd.DataFrame:
     })
 
 
+def close_sidebar() -> None:
+    """
+    Collapse the sidebar by clicking Streamlit's own close button. On phones the
+    sidebar covers the whole screen, so close it once the forecast is requested.
+    The counter makes each call a new iframe, so the script runs every time.
+    """
+    st.session_state["_close_sidebar_n"] = st.session_state.get("_close_sidebar_n", 0) + 1
+    components.html(f"""
+        <script>
+        // call {st.session_state["_close_sidebar_n"]}
+        // The collapse button only exists while the sidebar is open
+        const btn = window.parent.document.querySelector('[data-testid="stSidebarCollapseButton"] button');
+        if (btn) btn.click();
+        </script>
+    """, height=0)
+
+
 # ------------------------------ Session state defaults ------------------------------
 
 for var in VARIABLES:
@@ -206,6 +224,8 @@ with st.sidebar:
 
 if submitted:
     st.session_state.has_results = True
+    if st.session_state.compact:
+        close_sidebar()
 
 # ------------------------------ Main content ------------------------------
 if st.session_state.has_results:
