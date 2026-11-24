@@ -90,6 +90,9 @@ STRINGS = {
         "col.good_hours": "🟢 Horas boas",
         "col.best": "Melhor período",
         "all_day": "dia todo",
+        "col.good_short": "🟢 h",
+        "col.best_short": "Melhor",
+        "col.tides": "Marés",
         "col.high": "Preia-mar",
         "col.low": "Baixa-mar",
         "caption_colors_compact": "🟢 todas as condições dentro dos limites · 🟡 uma condição ligeiramente fora · "
@@ -220,6 +223,9 @@ STRINGS = {
         "col.good_hours": "🟢 Good hours",
         "col.best": "Best stretch",
         "all_day": "all day",
+        "col.good_short": "🟢 h",
+        "col.best_short": "Best",
+        "col.tides": "Tides",
         "col.high": "High tide",
         "col.low": "Low tide",
         "caption_colors_compact": "🟢 all conditions in range · 🟡 one condition slightly out · "

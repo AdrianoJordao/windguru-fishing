@@ -116,14 +116,15 @@ def is_phone() -> bool:
     return bool(MOBILE_UA.search(ua))
 
 
-def week_table(plot_data, tide_extremes) -> pd.DataFrame:
-    """ One row per day: good hours, best stretch, high and low tide times """
+def _week_rows(plot_data, tide_extremes) -> list:
+    """ One dict per day: day, good hours, best stretch, high and low tide times """
     summary = daily_summary(plot_data)
     highs: dict = {}
     lows: dict = {}
     if tide_extremes is not None and not tide_extremes.empty:
         for ts, kind in zip(tide_extremes["time"].dt.tz_convert(LOCAL_TZ), tide_extremes["type"]):
             (highs if kind == "High" else lows).setdefault(ts.date(), []).append(f"{ts:%H:%M}")
+
     def stretch(a, b) -> str:
         if pd.isna(a):
             return "—"
@@ -132,14 +133,50 @@ def week_table(plot_data, tide_extremes) -> pd.DataFrame:
         end = "24:00" if b.date() > a.date() and b.hour == 0 and b.minute == 0 else f"{b:%H:%M}"
         return f"{a:%H:%M}–{end}"
 
-    best = [stretch(a, b) for a, b in zip(summary["best_start"], summary["best_end"])]
+    return [{"day": d, "good": int(g), "best": stretch(a, b),
+             "highs": highs.get(d, []), "lows": lows.get(d, [])}
+            for d, g, a, b in zip(summary["date"], summary["green_hours"],
+                                  summary["best_start"], summary["best_end"])]
+
+
+def week_table(rows: list) -> pd.DataFrame:
+    """ Desktop: a normal table with one column per item """
     return pd.DataFrame({
-        t("col.day", lang): [fmt_day(d, lang) for d in summary["date"]],
-        t("col.good_hours", lang): summary["green_hours"],
-        t("col.best", lang): best,
-        t("col.high", lang): [" · ".join(highs.get(d, [])) or "—" for d in summary["date"]],
-        t("col.low", lang): [" · ".join(lows.get(d, [])) or "—" for d in summary["date"]],
+        t("col.day", lang): [fmt_day(r["day"], lang) for r in rows],
+        t("col.good_hours", lang): [r["good"] for r in rows],
+        t("col.best", lang): [r["best"] for r in rows],
+        t("col.high", lang): [" · ".join(r["highs"]) or "—" for r in rows],
+        t("col.low", lang): [" · ".join(r["lows"]) or "—" for r in rows],
     })
+
+
+def week_html(rows: list) -> str:
+    """ Phone: a narrow table (4 columns, tides stacked) that fits a ~360 px screen """
+    body = []
+    for r in rows:
+        tides = (f'<span class="wk-hi">▲ {" ".join(r["highs"]) or "—"}</span><br>'
+                 f'<span class="wk-lo">▼ {" ".join(r["lows"]) or "—"}</span>')
+        good = f'<b>{r["good"]}</b>' if r["good"] else '<span class="wk-dim">0</span>'
+        body.append(f'<tr><td>{fmt_day(r["day"], lang)}</td><td class="wk-num">{good}</td>'
+                    f'<td>{r["best"]}</td><td class="wk-tide">{tides}</td></tr>')
+    return f"""
+<style>
+  table.wk {{ width: 100%; border-collapse: collapse; font-size: 0.82rem; line-height: 1.3; }}
+  table.wk th, table.wk td {{ padding: 0.35rem 0.3rem; text-align: left; vertical-align: middle;
+                             border-bottom: 1px solid rgba(128,128,128,0.25); white-space: nowrap; }}
+  table.wk th {{ font-weight: 600; opacity: 0.75; }}
+  table.wk .wk-num {{ text-align: center; }}
+  table.wk .wk-dim {{ opacity: 0.45; }}
+  table.wk .wk-tide {{ font-variant-numeric: tabular-nums; }}
+  table.wk .wk-hi {{ color: #0e7490; }}
+  table.wk .wk-lo {{ color: #64748b; }}
+</style>
+<table class="wk">
+  <thead><tr><th>{t("col.day", lang)}</th><th class="wk-num">{t("col.good_short", lang)}</th>
+  <th>{t("col.best_short", lang)}</th><th>{t("col.tides", lang)}</th></tr></thead>
+  <tbody>{"".join(body)}</tbody>
+</table>
+"""
 
 
 def close_sidebar() -> None:
@@ -284,7 +321,11 @@ if st.session_state.has_results:
 
     # ---- Week at a glance ----
     st.subheader(t("week", lang))
-    st.dataframe(week_table(plot_data, tide_extremes), width='stretch', hide_index=True)
+    rows = _week_rows(plot_data, tide_extremes)
+    if st.session_state.compact:
+        st.markdown(week_html(rows), unsafe_allow_html=True)
+    else:
+        st.dataframe(week_table(rows), width='stretch', hide_index=True)
 
     # ---- Chart ----
     fig = build_figure(plot_data, user_ranges, tide_curve, tide_extremes,
