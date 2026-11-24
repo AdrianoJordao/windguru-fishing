@@ -161,8 +161,8 @@ def week_html(rows: list) -> str:
                     f'<td>{r["best"]}</td><td class="wk-tide">{tides}</td></tr>')
     return f"""
 <style>
-  table.wk {{ width: 100%; border-collapse: collapse; font-size: 0.82rem; line-height: 1.3; }}
-  table.wk th, table.wk td {{ padding: 0.35rem 0.3rem; text-align: left; vertical-align: middle;
+  table.wk {{ width: 100%; border-collapse: collapse; font-size: 0.76rem; line-height: 1.3; }}
+  table.wk th, table.wk td {{ padding: 0.35rem 0.2rem; text-align: left; vertical-align: middle;
                              border-bottom: 1px solid rgba(128,128,128,0.25); white-space: nowrap; }}
   table.wk th {{ font-weight: 600; opacity: 0.75; }}
   table.wk .wk-num {{ text-align: center; }}
