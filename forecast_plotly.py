@@ -145,9 +145,10 @@ def build_figure(plot_data: PlotData,
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)", zeroline=False)
 
     fig.update_layout(
-        title=dict(text=title, x=0.5, xanchor="center", y=0.995, yanchor="top"),
+        title=dict(text=title, x=0.5, xanchor="center", y=1, yref="container", yanchor="top",
+                   pad=dict(t=12), font=dict(size=18)),
         height=ROW_HEIGHT_PX * n_rows + 120,
-        margin=dict(l=50, r=20, t=80, b=90),
+        margin=dict(l=50, r=20, t=110, b=90),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="top", y=-0.03, x=0, xanchor="left"),
     )
