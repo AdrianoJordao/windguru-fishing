@@ -35,3 +35,19 @@ def test_build_figure_portuguese_default():
     texts = [a.text or "" for a in fig.layout.annotations]
     assert any("Altura das ondas" in x for x in texts)
     assert any("Ter 24/11" in x for x in texts)
+
+
+def test_build_figure_compact_one_day():
+    import pandas as pd
+    df = _frame([("WW3", 1.0, None), ("GFS", None, lambda h: 10.0)])
+    pdata = prepare_plot_data(df, DEFAULT_RANGES, start=datetime(2026, 11, 24, tzinfo=timezone.utc), days=2)
+    day = pdata.window(pd.Timestamp("2026-11-24", tz="UTC"), pd.Timestamp("2026-11-25", tz="UTC"))
+    curve = _sine(hours=48)
+
+    fig = build_figure(day, DEFAULT_RANGES, curve, find_extremes(curve), compact=True, show_models=False)
+    names = {t.name for t in fig.data}
+    assert "GFS" not in names and "WW3" not in names
+    assert fig.layout.showlegend is False
+
+    fig = build_figure(day, DEFAULT_RANGES, curve, find_extremes(curve), compact=True, show_models=True)
+    assert {"GFS", "WW3"} <= {t.name for t in fig.data}

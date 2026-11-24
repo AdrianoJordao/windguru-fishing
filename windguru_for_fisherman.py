@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from itertools import groupby
 from typing import Optional, Tuple
 
@@ -18,8 +19,8 @@ from config import (DEFAULT_SPOT_NAME, DEFAULT_SPOT_URL, KNOWN_SPOTS, LOCAL_TZ,
 from forecast_plotly import build_figure
 from i18n import DEFAULT_LANG, LANGS, fmt_day, fmt_day_time, t
 from tides import fetch_tide_curve, find_extremes
-from windguru_scraper import (WindguruScraper, best_windows, good_hours,
-                              parse_spot_id, prepare_plot_data)
+from windguru_scraper import (WindguruScraper, best_windows, daily_summary,
+                              good_hours, parse_spot_id, prepare_plot_data)
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ st.set_page_config(
     page_title=t("page_title", lang),
     page_icon="🎣",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"   # open on desktop, closed on phones
 )
 
 st.markdown(
@@ -55,7 +56,9 @@ st.markdown(
     <style>
         .block-container { padding-top: 3rem !important; }
         h1 { margin-top: 0rem !important; margin-bottom: 0.5rem !important; }
-        section[data-testid="stSidebar"] { width: 420px !important; }
+        @media (min-width: 768px) {
+            section[data-testid="stSidebar"] { width: 420px !important; }
+        }
     </style>
     """,
     unsafe_allow_html=True
@@ -100,6 +103,44 @@ def var_label(col: str, unit: Optional[str] = None) -> str:
     return f"{label} ({unit})" if unit else label
 
 
+MOBILE_UA = re.compile(r"Mobi|Android|iPhone|iPod|Windows Phone", re.IGNORECASE)
+
+
+def is_phone() -> bool:
+    """ Best guess from the browser's User-Agent; the sidebar toggle can override it """
+    try:
+        ua = st.context.headers.get("User-Agent", "") or ""
+    except Exception:
+        ua = ""
+    return bool(MOBILE_UA.search(ua))
+
+
+def week_table(plot_data, tide_extremes) -> pd.DataFrame:
+    """ One row per day: good hours, best stretch, high and low tide times """
+    summary = daily_summary(plot_data)
+    highs: dict = {}
+    lows: dict = {}
+    if tide_extremes is not None and not tide_extremes.empty:
+        for ts, kind in zip(tide_extremes["time"].dt.tz_convert(LOCAL_TZ), tide_extremes["type"]):
+            (highs if kind == "High" else lows).setdefault(ts.date(), []).append(f"{ts:%H:%M}")
+    def stretch(a, b) -> str:
+        if pd.isna(a):
+            return "—"
+        if b - a >= pd.Timedelta(days=1):
+            return t("all_day", lang)
+        end = "24:00" if b.date() > a.date() and b.hour == 0 and b.minute == 0 else f"{b:%H:%M}"
+        return f"{a:%H:%M}–{end}"
+
+    best = [stretch(a, b) for a, b in zip(summary["best_start"], summary["best_end"])]
+    return pd.DataFrame({
+        t("col.day", lang): [fmt_day(d, lang) for d in summary["date"]],
+        t("col.good_hours", lang): summary["green_hours"],
+        t("col.best", lang): best,
+        t("col.high", lang): [" · ".join(highs.get(d, [])) or "—" for d in summary["date"]],
+        t("col.low", lang): [" · ".join(lows.get(d, [])) or "—" for d in summary["date"]],
+    })
+
+
 # ------------------------------ Session state defaults ------------------------------
 
 for var in VARIABLES:
@@ -110,6 +151,8 @@ st.session_state.setdefault("spot_name", DEFAULT_SPOT_NAME)
 st.session_state.setdefault("tide_lat", "")
 st.session_state.setdefault("tide_lon", "")
 st.session_state.setdefault("has_results", False)
+st.session_state.setdefault("compact", is_phone())
+st.session_state.setdefault("show_models", False)
 
 # ------------------------------ Header: title + language toggle ------------------------------
 head_left, head_right = st.columns([4, 1], vertical_alignment="center")
@@ -129,6 +172,7 @@ st.markdown(t("subtitle", lang))
 # ------------------------------ Sidebar form ------------------------------
 with st.sidebar:
     st.header(t("sidebar_header", lang))
+    st.toggle(t("compact_view", lang), key="compact", help=t("compact_help", lang))
 
     with st.form("fishing_params"):
         st.subheader(t("location", lang))
@@ -218,11 +262,34 @@ if st.session_state.has_results:
     else:
         st.warning(t("no_windows", lang))
 
+    # ---- Week at a glance ----
+    st.subheader(t("week", lang))
+    st.dataframe(week_table(plot_data, tide_extremes), width='stretch', hide_index=True)
+
     # ---- Chart ----
     fig = build_figure(plot_data, user_ranges, tide_curve, tide_extremes,
                        title=t("chart.title", lang, name=spot_name), lang=lang)
-    st.plotly_chart(fig, config={"displaylogo": False})
-    st.caption(t("caption_colors", lang))
+    if st.session_state.compact:
+        # Phone: one day at a time, static image so swiping scrolls the page
+        days = sorted({ts.date() for ts in plot_data.status.index.tz_convert(LOCAL_TZ)})
+        today = pd.Timestamp.now(tz=LOCAL_TZ).date()
+        default_day = today if today in days else days[0]
+        if st.session_state.get("chart_day") not in days:
+            st.session_state.chart_day = default_day
+        day = st.pills(t("pick_day", lang), options=days, format_func=lambda d: fmt_day(d, lang),
+                       key="chart_day", label_visibility="collapsed") or default_day
+        st.toggle(t("show_models", lang), key="show_models")
+
+        day_start = pd.Timestamp(day).tz_localize(LOCAL_TZ)
+        day_fig = build_figure(plot_data.window(day_start, day_start + pd.Timedelta(days=1)),
+                               user_ranges, tide_curve, tide_extremes,
+                               title=f"{spot_name} – {fmt_day(day, lang)}", lang=lang,
+                               compact=True, show_models=st.session_state.show_models)
+        st.plotly_chart(day_fig, config={"staticPlot": True})
+        st.caption(t("caption_colors_compact", lang))
+    else:
+        st.plotly_chart(fig, config={"displaylogo": False})
+        st.caption(t("caption_colors", lang))
     if tide_curve is not None and not tide_curve.empty and coords:
         st.caption(t("caption_tides", lang, lat=coords[0], lon=coords[1],
                      source=t(f"source.{coords[2]}", lang)))

@@ -87,3 +87,21 @@ def test_prepare_plot_data_and_good_hours():
 
     windows = best_windows(pd_, min_hours=2)
     assert windows and windows[0][2] >= 20
+
+
+def test_window_and_daily_summary():
+    from windguru_scraper import daily_summary
+    df = _frame([("GFS", 1.0, lambda h: 10.0 if h < 24 else 40.0)])
+    start = datetime(2026, 11, 24, 0, tzinfo=timezone.utc)
+    pdata = prepare_plot_data(df, DEFAULT_RANGES, start=start, days=2)
+
+    day = pdata.window(pd.Timestamp("2026-11-24 00:00", tz="UTC"), pd.Timestamp("2026-11-25 00:00", tz="UTC"))
+    assert len(day.means) == 24 and len(day.status) == 24
+    assert day.interp["datetime"].max() < pd.Timestamp("2026-11-25", tz="UTC")
+    assert all(day.start <= a < b <= day.end for a, b, _ in day.spans)
+
+    summary = daily_summary(pdata)
+    assert len(summary) >= 2
+    assert summary["green_hours"].sum() == int((pdata.status == "green").sum())
+    first = summary.iloc[0]
+    assert first["best_start"] < first["best_end"]

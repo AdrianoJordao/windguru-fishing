@@ -273,6 +273,16 @@ class PlotData:
     start: Optional[pd.Timestamp] = None
     end: Optional[pd.Timestamp] = None
 
+    def window(self, start: pd.Timestamp, end: pd.Timestamp) -> "PlotData":
+        """ The same data cut to [start, end) (UTC), e.g. one day for the mobile chart """
+        start, end = pd.Timestamp(start).tz_convert("UTC"), pd.Timestamp(end).tz_convert("UTC")
+        in_win = lambda idx: (idx >= start) & (idx < end)
+        interp = self.interp[in_win(self.interp["datetime"])] if not self.interp.empty else self.interp
+        spans = [(max(t0, start), min(t1, end), s) for t0, t1, s in self.spans if t1 > start and t0 < end]
+        return PlotData(interp=interp, means=self.means[in_win(self.means.index)],
+                        status=self.status[in_win(self.status.index)], spans=spans,
+                        start=start, end=end)
+
 
 def _rel_dev_to_bound(val: float, lo: float, hi: float) -> float:
     rng = float(hi) - float(lo)
@@ -398,3 +408,30 @@ def best_windows(plot_data: PlotData, min_hours: int = 2,
         if s == "green" and hours >= min_hours:
             out.append((t0.tz_convert(tz).to_pydatetime(), t1.tz_convert(tz).to_pydatetime(), hours))
     return out
+
+
+def daily_summary(plot_data: PlotData, tz: tzinfo = LOCAL_TZ) -> pd.DataFrame:
+    """
+    One row per local day: green/yellow hour counts and the longest green
+    stretch inside that day (local start/end, NaT if none).
+    """
+    columns = ["date", "green_hours", "yellow_hours", "best_start", "best_end"]
+    if plot_data.status.empty:
+        return pd.DataFrame(columns=columns)
+
+    local_status = pd.Series(plot_data.status.values,
+                             index=plot_data.status.index.tz_convert(tz))
+    rows = []
+    for day, day_status in local_status.groupby(local_status.index.date):
+        day_start = pd.Timestamp(day).tz_localize(tz)
+        day_end = day_start + pd.Timedelta(days=1)
+        best = None
+        for t0, t1, s in plot_data.spans:
+            if s != "green":
+                continue
+            a, b = max(t0.tz_convert(tz), day_start), min(t1.tz_convert(tz), day_end)
+            if b > a and (best is None or b - a > best[1] - best[0]):
+                best = (a, b)
+        rows.append((day, int((day_status == "green").sum()), int((day_status == "yellow").sum()),
+                     best[0] if best else pd.NaT, best[1] if best else pd.NaT))
+    return pd.DataFrame(rows, columns=columns)

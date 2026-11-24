@@ -23,6 +23,7 @@ RANGE_COLOR = "rgba(59, 130, 246, 0.12)"
 MEAN_COLOR = "#111827"
 TIDE_COLOR = "#0e7490"
 ROW_HEIGHT_PX = 190
+COMPACT_ROW_HEIGHT_PX = 150
 
 
 def to_local_naive(idx, tz: tzinfo) -> pd.DatetimeIndex:
@@ -36,7 +37,13 @@ def build_figure(plot_data: PlotData,
                  tide_extremes: Optional[pd.DataFrame] = None,
                  title: str = "",
                  tz: tzinfo = LOCAL_TZ,
-                 lang: str = DEFAULT_LANG) -> go.Figure:
+                 lang: str = DEFAULT_LANG,
+                 compact: bool = False,
+                 show_models: bool = True) -> go.Figure:
+    """
+    compact=True is the phone layout: meant for a single day shown as a static
+    image, so no legend, no day labels, bigger text and shorter panels.
+    """
     ranges = ranges or DEFAULT_RANGES
 
     def _local(idx) -> pd.DatetimeIndex:
@@ -48,7 +55,7 @@ def build_figure(plot_data: PlotData,
     fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True,
                         vertical_spacing=0.025, subplot_titles=titles)
     # Panel titles on the left, so the day labels above the first panel stay free
-    fig.update_annotations(x=0, xanchor="left", font=dict(size=13))
+    fig.update_annotations(x=0, xanchor="left", font=dict(size=15 if compact else 13))
 
     # Consistent colour per model across all panels
     palette = plotly.colors.qualitative.Plotly + plotly.colors.qualitative.Safe
@@ -64,13 +71,13 @@ def build_figure(plot_data: PlotData,
             fig.add_hrect(y0=lo, y1=hi, fillcolor=RANGE_COLOR, line_width=0,
                           layer="below", row=row, col=1)
 
-        for model in models:
+        for model in (models if show_models else []):
             g = plot_data.interp[plot_data.interp["model"] == model]
             if not g[var.col].notna().any():
                 continue
             fig.add_trace(go.Scatter(
                 x=_local(g["datetime"]), y=g[var.col], name=model,
-                legendgroup=model, showlegend=model not in shown_in_legend,
+                legendgroup=model, showlegend=not compact and model not in shown_in_legend,
                 mode="lines+markers", marker=dict(size=3), line=dict(width=1, color=model_color[model]),
                 hovertemplate=f"{model}: %{{y:.1f}} {var.unit}<extra></extra>",
             ), row=row, col=1)
@@ -79,7 +86,7 @@ def build_figure(plot_data: PlotData,
         if var.col in plot_data.means and plot_data.means[var.col].notna().any():
             fig.add_trace(go.Scatter(
                 x=x_mean, y=plot_data.means[var.col], name=mean_name,
-                legendgroup="mean", showlegend="mean" not in shown_in_legend,
+                legendgroup="mean", showlegend=not compact and "mean" not in shown_in_legend,
                 mode="lines", line=dict(width=2.2, color=MEAN_COLOR),
                 hovertemplate=f"<b>{mean_short}: %{{y:.1f}} {var.unit}</b><extra></extra>",
             ), row=row, col=1)
@@ -114,11 +121,11 @@ def build_figure(plot_data: PlotData,
                     x=x, y=e["height_cm"], name=kind_name, showlegend=False,
                     mode="markers+text", marker=dict(symbol=symbol, size=9, color=TIDE_COLOR),
                     text=[f"{t:%H:%M}<br>{h:+.0f}" for t, h in zip(x, e["height_cm"])],
-                    textposition=pos, textfont=dict(size=10),
+                    textposition=pos, textfont=dict(size=12 if compact else 10),
                     hovertemplate=f"{kind_name} %{{x|%H:%M}}: %{{y:+.0f}} cm<extra></extra>",
                 ), row=tide_row, col=1)
             lo, hi = float(curve.min()), float(curve.max())
-            pad = max(25.0, 0.35 * (hi - lo))
+            pad = max(60.0, 0.6 * (hi - lo)) if compact else max(25.0, 0.35 * (hi - lo))
             fig.update_yaxes(range=[lo - pad, hi + pad], row=tide_row, col=1)
     else:
         fig.add_annotation(text=t("chart.no_tide", lang), showarrow=False, font=dict(color="gray"),
@@ -130,8 +137,8 @@ def build_figure(plot_data: PlotData,
                       fillcolor=STATUS_COLORS.get(status, STATUS_COLORS["red"]),
                       opacity=STATUS_OPACITY, line_width=0, layer="below", row="all", col=1)
 
-    # Day separators and day labels on top
-    if plot_data.start is not None and plot_data.end is not None:
+    # Day separators and day labels on top (the compact view shows one day, named in the title)
+    if plot_data.start is not None and plot_data.end is not None and not compact:
         first = _local([plot_data.start])[0].normalize()
         last = _local([plot_data.end])[0]
         for day in pd.date_range(first, last, freq="D"):
@@ -143,17 +150,30 @@ def build_figure(plot_data: PlotData,
                                font=dict(size=12))
         fig.update_xaxes(range=[first, _local([plot_data.end])[0]])
 
+    if compact and plot_data.start is not None and plot_data.end is not None:
+        fig.update_xaxes(range=[_local([plot_data.start])[0], _local([plot_data.end])[0]])
+
     fig.update_xaxes(dtick=3 * 3600 * 1000, tickformat="%Hh", showgrid=True,
                      gridcolor="rgba(128,128,128,0.15)")
     fig.update_xaxes(showticklabels=True, row=n_rows, col=1)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.2)", zeroline=False)
 
-    fig.update_layout(
-        title=dict(text=title, x=0.5, xanchor="center", y=1, yref="container", yanchor="top",
-                   pad=dict(t=12), font=dict(size=18)),
-        height=ROW_HEIGHT_PX * n_rows + 120,
-        margin=dict(l=50, r=20, t=110, b=90),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="top", y=-0.03, x=0, xanchor="left"),
-    )
+    if compact:
+        fig.update_layout(
+            title=dict(text=title, x=0, xanchor="left", y=1, yref="container", yanchor="top",
+                       pad=dict(t=8, l=8), font=dict(size=17)),
+            height=COMPACT_ROW_HEIGHT_PX * n_rows + 60,
+            margin=dict(l=42, r=10, t=55, b=30),
+            font=dict(size=13),
+            showlegend=False,
+        )
+    else:
+        fig.update_layout(
+            title=dict(text=title, x=0.5, xanchor="center", y=1, yref="container", yanchor="top",
+                       pad=dict(t=12), font=dict(size=18)),
+            height=ROW_HEIGHT_PX * n_rows + 120,
+            margin=dict(l=50, r=20, t=110, b=90),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="top", y=-0.03, x=0, xanchor="left"),
+        )
     return fig
